@@ -5,6 +5,11 @@ python scripts/watch_training.py            # live, latest 3 epochs
 python scripts/watch_training.py --once     # one snapshot
 python scripts/watch_training.py --last 10  # latest 10 across both stages
 
+Manual launches (calling scripts/train.py directly, so there is no run directory
+with status.json and stageN_console.log) are supported too::
+
+python scripts/watch_training.py --log logs/my_launch.log --stage 2
+
 Requires only Python's standard library; it never imports torch or uses a GPU.
 """
 from __future__ import annotations
@@ -117,10 +122,11 @@ def epoch_blocks(text: str, stage: int, width: int | None = None) -> list[str]:
     return result
 
 
-def snapshot(run_dir: Path, last: int, width: int | None = None) -> tuple[str, bool]:
-    status_path = run_dir / 'status.json'
+def snapshot(run_dir: Path, last: int, width: int | None = None,
+             log: Path | None = None, stage: int | None = None) -> tuple[str, bool]:
+    status_path = run_dir / 'status.json' if run_dir else None
     try:
-        status = json.loads(status_path.read_text())
+        status = json.loads(status_path.read_text()) if status_path else {}
     except (OSError, ValueError):
         status = {}
     state = status.get('state', 'waiting')
@@ -133,10 +139,17 @@ def snapshot(run_dir: Path, last: int, width: int | None = None) -> tuple[str, b
         except PermissionError:
             pass
     blocks = []
-    for stage in (1, 2):
-        path = run_dir / f'stage{stage}_console.log'
-        if path.exists():
-            blocks.extend(epoch_blocks(path.read_text(errors='replace'), stage,width))
+    # Manual launches (scripts/train.py directly) have no run-dir layout, so the
+    # caller may point at one console log and name its stage explicitly.
+    if log is not None:
+        if log.exists():
+            blocks.extend(epoch_blocks(log.read_text(errors='replace'),
+                                       stage or 2, width))
+    else:
+        for stage_id in (1, 2):
+            path = run_dir / f'stage{stage_id}_console.log'
+            if path.exists():
+                blocks.extend(epoch_blocks(path.read_text(errors='replace'), stage_id, width))
     budget = status.get('epoch_budget', '?')
     patience = status.get('early_stop_patience', '?')
     title = (f'PGSF-Det | GPUs {status.get("physical_gpus", [0, 7])} | '
@@ -168,8 +181,18 @@ def main():
     parser.add_argument('--last', type=int, default=3, help='show latest N epoch blocks')
     parser.add_argument('--interval', type=float, default=.2, help='refresh seconds (default 0.2)')
     parser.add_argument('--width',type=int,help='override detected terminal columns')
+    parser.add_argument('--log', type=Path,
+                        help='watch this console log directly (manual launches that '
+                             'have no run-dir layout); disables status.json reading')
+    parser.add_argument('--stage', type=int, choices=(1, 2),
+                        help='stage label for --log (default 2)')
     args = parser.parse_args()
-    if args.run_dir is None:
+    if args.log is not None:
+        if not args.log.is_file():
+            parser.error(f'log file does not exist: {args.log}')
+        # No run directory is required in this mode; status.json stays absent.
+        args.run_dir = None
+    elif args.run_dir is None:
         latest=ROOT/'outputs/latest_training_run.json'
         args.run_dir=(Path(json.loads(latest.read_text())['run_dir']) if latest.exists()
                       else ROOT/'outputs/fulltrain_20261010_200e')
@@ -177,7 +200,7 @@ def main():
         parser.error('--last and --interval must be positive')
     if args.width is not None and args.width<20:
         parser.error('--width must be at least 20')
-    if not args.run_dir.is_dir():
+    if args.run_dir is not None and not args.run_dir.is_dir():
         parser.error(f'run directory does not exist: {args.run_dir}')
     previous = None
     interactive=sys.stdout.isatty() and not args.once
@@ -188,13 +211,14 @@ def main():
     try:
         while True:
             columns=args.width or max(20,shutil.get_terminal_size((120,40)).columns-1)
-            output, finished = snapshot(args.run_dir, args.last,columns)
+            output, finished = snapshot(args.run_dir, args.last, columns,
+                                        args.log, args.stage)
             if interactive:
                 terminal_height=shutil.get_terminal_size((120,40)).lines
                 screen=output.splitlines()
                 if len(screen)>terminal_height-1:
                     # Prefer the active epoch at small heights; avoid scrolling on redraw.
-                    output,_=snapshot(args.run_dir,1,columns)
+                    output,_=snapshot(args.run_dir,1,columns,args.log,args.stage)
                     screen=output.splitlines()
                 screen=[line[:columns] for line in screen[:max(1,terminal_height-1)]]
                 sys.stdout.write(terminal_frame(screen))
