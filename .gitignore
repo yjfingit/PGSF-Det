@@ -1,0 +1,12 @@
+outputs/
+logs/
+__pycache__/
+*.pyc
+*.pt
+*.pth
+*.onnx
+*.engine
+.DS_Store
+.ipynb_checkpoints/
+*.egg-info/
+.venv/

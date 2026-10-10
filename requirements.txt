@@ -1,0 +1,9 @@
+# CUDA build selection is environment-specific; install a matching torch/torchvision pair.
+# Tested: torch 2.5.1+cu121, torchvision 0.20.1+cu121, Python 3.12.
+torch>=2.5,<2.6
+torchvision>=0.20,<0.21
+# Local YOLO11 backbone checkpoint; no automatic pretrained-weight download.
+ultralytics==8.4.154
+numpy>=1.26
+Pillow>=10
+PyYAML>=6

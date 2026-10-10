@@ -1,0 +1,31 @@
+flowchart TB
+    R["RGB image<br/>B × 3 × 800 × 1280"] --> BR["RGB YOLO11s backbone<br/>P2 / P3 / P4 / P5"]
+    T["TIR image<br/>B × 1 × 512 × 640"] --> BT["TIR YOLO11s backbone<br/>Independent weights"]
+    BR --> SR["LiteMSCE on P2<br/>P3 / P4 / P5 pass through"]
+    BT --> ST["LiteMSCE on P2<br/>P3 / P4 / P5 pass through"]
+    SR --> NR["RGB lightweight multiscale neck<br/>P2–P5, each 128 channels"]
+    ST --> NT["TIR lightweight multiscale neck<br/>P2–P5, each 128 channels"]
+    NR --> CR["P2/P3 dense proposal head<br/>Heatmap + coarse box + quality<br/>64 RGB candidate tokens"]
+    NT --> CT["P2/P3 dense proposal head<br/>Heatmap + coarse box + quality<br/>64 TIR candidate tokens"]
+    NR -. "Global average pooled P5" .-> GC["Concatenate + MLP<br/>Both-image context: B × 128"]
+    NT -. "Global average pooled P5" .-> GC
+    GC --> GEO["Directional conditional geometry<br/>Affine + learned residual<br/>Mean μ and covariance Σ"]
+    CR -. "Query features, centers and sizes" .-> GEO
+    CT -. "Query features, centers and sizes" .-> GEO
+    CR --> MID["Bidirectional sparse cross-attention<br/>8 local + 16 global + 1 null key/query<br/>128 dimensions, 4 heads<br/>Reliability-gated residual"]
+    CT --> MID
+    GEO -. "Covariance-guided sampling + bounded prior" .-> MID
+    NR -. "Opposite-modality P2/P3 samples" .-> MID
+    NT -. "Opposite-modality P2/P3 samples" .-> MID
+    MID --> WR["RGB enhanced tokens<br/>Normalized residual scatter to own P3/P4<br/>Own P2/P5 retained"]
+    MID --> WT["TIR enhanced tokens<br/>Normalized residual scatter to own P3/P4<br/>Own P2/P5 retained"]
+    WR --> QR["Top-32 by center objectness<br/>9-point region sampling on P2–P5<br/>Token + ROI projection + box encoding<br/>B × 32 × 128"]
+    WT --> QT["Top-32 by center objectness<br/>9-point region sampling on P2–P5<br/>Token + ROI projection + box encoding<br/>B × 32 × 128"]
+    QR --> LATE["Bidirectional region cross-attention<br/>Semantic + center + learned size prior<br/>Null match + reliability gate"]
+    QT --> LATE
+    GEO -. "Selected μ, Σ and confidence" .-> LATE
+    GC -. "Learned log-size relation" .-> LATE
+    LATE --> HR["Independent RGB refinement head<br/>128 → 128 → 5"]
+    LATE --> HT["Independent TIR refinement head<br/>128 → 128 → 5"]
+    HR --> OR["Decode relative to RGB coarse boxes<br/>Score fusion + RGB NMS<br/>RGB native-pixel boxes"]
+    HT --> OT["Decode relative to TIR coarse boxes<br/>Score fusion + TIR NMS<br/>TIR native-pixel boxes"]
