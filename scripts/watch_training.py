@@ -186,6 +186,9 @@ def main():
                              'have no run-dir layout); disables status.json reading')
     parser.add_argument('--stage', type=int, choices=(1, 2),
                         help='stage label for --log (default 2)')
+    parser.add_argument('--height', type=int,
+                        help='rows available to the live view (needed over ssh, where '
+                             'the terminal size cannot be detected)')
     args = parser.parse_args()
     if args.log is not None:
         if not args.log.is_file():
@@ -203,8 +206,14 @@ def main():
     if args.run_dir is not None and not args.run_dir.is_dir():
         parser.error(f'run directory does not exist: {args.run_dir}')
     previous = None
-    interactive=sys.stdout.isatty() and not args.once
-    if interactive:
+    # Over ssh stdout is a pipe, so isatty() is False; the live redraw must not be
+    # gated on it or every refresh would append a new copy and flood the scrollback.
+    live = not args.once
+    alternate = live and sys.stdout.isatty()
+    # Over a pipe the terminal size falls back to (120,40); honour --height so the
+    # viewer can still show more than one epoch block.
+    default_rows = args.height or shutil.get_terminal_size((120, 40)).lines
+    if alternate:
         # Alternate screen isolates the live viewer from terminal scrollback.
         sys.stdout.write('\033[?1049h\033[?25l\033[2J')
         sys.stdout.flush()
@@ -213,8 +222,8 @@ def main():
             columns=args.width or max(20,shutil.get_terminal_size((120,40)).columns-1)
             output, finished = snapshot(args.run_dir, args.last, columns,
                                         args.log, args.stage)
-            if interactive:
-                terminal_height=shutil.get_terminal_size((120,40)).lines
+            if live:
+                terminal_height=default_rows
                 screen=output.splitlines()
                 if len(screen)>terminal_height-1:
                     # Prefer the active epoch at small heights; avoid scrolling on redraw.
@@ -233,8 +242,12 @@ def main():
         # Stopping the viewer never interrupts training.
         pass
     finally:
-        if interactive:
+        if alternate:
             sys.stdout.write('\033[?25h\033[?1049l')
+            sys.stdout.flush()
+        elif live:
+            # Leave the cursor on a fresh line below the last redrawn frame.
+            sys.stdout.write('\n')
             sys.stdout.flush()
 
 
