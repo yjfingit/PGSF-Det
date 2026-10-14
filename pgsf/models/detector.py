@@ -103,10 +103,33 @@ class PGSFDet(nn.Module):
     def __init__(self, cfg):
         super().__init__()
         self.cfg = cfg
-        self.register_buffer("_affine_A", torch.tensor([[1., 0., 0.], [0., 1., 0.]]))
+        # ``A`` is a *trainable* parameter, not a frozen buffer: the RGB->TIR
+        # mapping is a property of the camera pair, so it must stay adjustable
+        # when the model moves to another platform, instead of locking in the
+        # value fitted on the training set. ``_affine_reverse`` is kept only for
+        # checkpoint compatibility -- the forward pass recomputes the inverse
+        # from ``A`` each step (see ``pair_affines`` in detector_v2).
+        self._affine_A = nn.Parameter(torch.tensor([[1., 0., 0.], [0., 1., 0.]]))
         self.register_buffer("_affine_b", torch.zeros(2))
-        self.register_buffer("_affine_reverse",self._affine_A.clone())
-        self.v2=cfg.model.architecture_version>=2
+        self.register_buffer("_affine_reverse", self._affine_A.detach().clone())
+        # ``arch`` is the *only* place the architecture generation is decided.
+        # ``v2`` stays strictly "the v2 graph" so v2-only assertions (e.g. the
+        # gradient audit in scripts/check_forward.py) are not accidentally taken
+        # by a v3 model, which has no ``mid``/``late`` submodules at all.
+        self.arch = int(cfg.model.architecture_version)
+        self.v4 = self.arch >= 4
+        self.v3 = self.arch == 3
+        self.v2 = self.arch == 2
+        if self.v4:
+            from pgsf.models.detector_v4 import build_modules as build_v4
+            build_v4(self, cfg)
+            self.mid_on = self.late_on = False
+            return
+        if self.v3:
+            from pgsf.models.detector_v3 import build_modules as build_v3
+            build_v3(self, cfg)
+            self.mid_on = self.late_on = False
+            return
         if self.v2:
             from pgsf.models.detector_v2 import build_modules
             build_modules(self,cfg)
@@ -150,8 +173,20 @@ class PGSFDet(nn.Module):
         """The fitted global affine (A is 2x3 homogeneous, b is its 3rd column)."""
         return self._affine_A, self._affine_b
 
+    @torch.no_grad()
     def set_affine(self, A: torch.Tensor, b: torch.Tensor) -> None:
-        """Persist the homogeneous RGB->TIR affine in every stage's checkpoint."""
+        """Seed the homogeneous RGB->TIR affine, which is now trainable.
+
+        Called at start-up with the training-split fit; the optimiser keeps
+        updating the value afterwards.
+
+        v3 has no fixed affine prior by design -- correspondence comes from
+        learned appearance retrieval -- so this is a documented no-op there and
+        the value is never read by the v3 forward pass.  v4 removes the affine
+        prior as well, so the same holds for it.
+        """
+        if self.v3 or self.v4:
+            return
         A = A.detach().reshape(2, 3)
         self._affine_A.copy_(A.to(self._affine_A))
         self._affine_b.copy_(A[:, 2].to(self._affine_b))
@@ -180,17 +215,23 @@ class PGSFDet(nn.Module):
         if stage1_transfer:
             missing = set(own) - set(state)
             unexpected = set(state) - set(own)
-            bad = [k for k in missing if not k.startswith(("mid.", "late.","geometry_context."))]
+            bad = [k for k in missing
+                   if not k.startswith(("mid.", "late.", "corr.", "match.", "td.",
+                                        "geometry_context."))]
             if bad or unexpected:
                 raise RuntimeError(f"invalid stage-1 transfer: missing={bad}, unexpected={sorted(unexpected)}")
             for key in missing:
                 state[key] = own[key]
         result = self.load_state_dict(state, strict=True)
-        self.set_affine(self._affine_A, self._affine_b)
+        if not (self.v3 or self.v4):
+            # v3/v4 never read the affine; re-seeding it would only create the
+            # illusion that a fitted prior is in play.
+            self.set_affine(self._affine_A, self._affine_b)
         return result
 
     def set_training_progress(self, fraction):
-        if not self.v2:return
+        self.progress_fraction = float(fraction)
+        if self.arch < 2:return
         end=max(self.cfg.model.injection_end_fraction,1e-6)
         ratio=self.cfg.model.inject_gt_ratio*max(0.,1-fraction/end)
         for branch in (self.rgb_branch,self.tir_branch):branch.cand.inject_gt_ratio=ratio
@@ -205,6 +246,12 @@ class PGSFDet(nn.Module):
 
     # ------------------------------------------------------------------ #
     def forward(self, batch: Dict[str, torch.Tensor]) -> Dict[str, object]:
+        if self.v4:
+            from pgsf.models.detector_v4 import forward as forward_v4
+            return forward_v4(self, batch)
+        if self.v3:
+            from pgsf.models.detector_v3 import forward as forward_v3
+            return forward_v3(self,batch)
         if self.v2:
             from pgsf.models.detector_v2 import forward
             return forward(self,batch)
@@ -300,6 +347,12 @@ class PGSFDet(nn.Module):
     # ------------------------------------------------------------------ #
     def compute_losses(self, out: Dict[str, object]) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         """Full objective; returns (total_loss, per-term detached dict)."""
+        if self.v4:
+            from pgsf.models.detector_v4 import compute_losses as compute_losses_v4
+            return compute_losses_v4(self, out)
+        if self.v3:
+            from pgsf.models.detector_v3 import compute_losses as compute_losses_v3
+            return compute_losses_v3(self,out)
         if self.v2:
             from pgsf.models.detector_v2 import compute_losses
             return compute_losses(self,out)
@@ -411,15 +464,14 @@ class PGSFDet(nn.Module):
         res = {}
         for name, size_key in (("rgb", "rgb_hw"), ("tir", "tir_hw")):
             if '_decoded_' + name in out:
-                boxes,scores=out['_decoded_'+name]
-                res[name]=postprocess_detections(boxes,scores,max_det,score_thr,nms_thr)
+                boxes,scores=out['_decoded_'+name][:2]
+                labels=out['_decoded_'+name][2] if len(out['_decoded_'+name])>2 else None
+                res[name]=postprocess_detections(boxes,scores,max_det,score_thr,nms_thr,labels)
                 continue
-            res[name] = decode_detections(
-                out[f"pred_{name}"], out["sel_" + name]["pts"], batch[size_key],
-                max_det, score_thr, nms_thr, self.cfg.model.max_wh,
-                out["sel_"+name]["boxes"] if self.v2 else None,
-                out["sel_"+name].get("objectness") if self.v2 else None,
-                self.cfg.model.score_fusion_power)
+            boxes,scores,labels=decode_modality(out[f"pred_{name}"], out["sel_"+name],
+                                                batch[size_key], self.cfg.model)
+            res[name]=postprocess_detections(boxes,scores,max_det,score_thr,nms_thr,
+                                             labels if self.arch>=3 else None)
         if was_training:
             self.train()
         return res, out
@@ -466,6 +518,29 @@ def decode_detections(raw: torch.Tensor, cand_pts: torch.Tensor, img_hw: torch.T
     return postprocess_detections(boxes,scores,max_det,score_thr,nms_thr)
 
 
+def decode_modality(raw, sel, img_hw, model_cfg):
+    """One shared decoder for every architecture generation.
+
+    Returns ``(boxes_xyxy (B,K,4), scores (B,K), labels (B,K) long)`` in the
+    modality's **own** pixel space.  ``labels`` is all-zero for the single-class
+    legacy head, so callers that ignore classes stay source compatible.
+    """
+    if int(model_cfg.architecture_version) >= 4:
+        from pgsf.models.head_v4 import decode_boxes_scores_v4
+        return decode_boxes_scores_v4(raw, sel["boxes"], img_hw, sel.get("objectness"),
+                                      model_cfg.score_fusion_power, model_cfg.max_wh)
+    if int(model_cfg.architecture_version) >= 3:
+        from pgsf.models.head_v3 import decode_boxes_scores_v3
+        return decode_boxes_scores_v3(raw, sel["boxes"], img_hw, sel.get("objectness"),
+                                      model_cfg.score_fusion_power, model_cfg.max_wh)
+    use_v2 = int(model_cfg.architecture_version) >= 2
+    boxes, scores = decode_boxes_scores(
+        raw, sel["pts"], img_hw, model_cfg.max_wh,
+        sel["boxes"] if use_v2 else None,
+        sel.get("objectness") if use_v2 else None, model_cfg.score_fusion_power)
+    return boxes, scores, torch.zeros(boxes.shape[:2], dtype=torch.long, device=boxes.device)
+
+
 def decode_boxes_scores(raw,cand_pts,img_hw,max_wh=.5,base_boxes=None,proposal_scores=None,score_power=.5):
     """Fixed-shape decode, suitable for CUDA graph capture; returns B,K,4 and B,K."""
     from pgsf.models.head import decode_pred
@@ -479,13 +554,15 @@ def decode_boxes_scores(raw,cand_pts,img_hw,max_wh=.5,base_boxes=None,proposal_s
     return boxes,scores
 
 
-def postprocess_detections(boxes,scores,max_det=50,score_thr=.05,nms_thr=.45):
+def postprocess_detections(boxes,scores,max_det=50,score_thr=.05,nms_thr=.45,labels=None):
     """Variable-size thresholding and NMS stay outside the captured graph."""
     result=[]
     for i in range(boxes.shape[0]):
         valid=torch.where(scores[i]>=score_thr)[0]
         keep=valid[batched_nms(boxes[i][valid],scores[i][valid],nms_thr,max_det)]
-        result.append({'boxes':boxes[i][keep],'scores':scores[i][keep]})
+        det={'boxes':boxes[i][keep],'scores':scores[i][keep]}
+        if labels is not None:det['labels']=labels[i][keep]
+        result.append(det)
     return result
 
 
@@ -526,12 +603,18 @@ def batched_nms(boxes: torch.Tensor, scores: torch.Tensor, iou_thr: float,
 def param_groups(model: PGSFDet, cfg) -> List[Dict[str, object]]:
     """Backbone gets ``lr_backbone_mult`` * lr, newly initialised fusion modules
     get ``lr_new_mult`` * lr.  Everything else uses the base lr."""
-    bb, new, rest = [], [], []
-    new_prefixes = ("mid.", "late.","geometry_context.")
+    bb, new, geo, rest = [], [], [], []
+    new_prefixes = ("mid.", "late.", "corr.", "match.", "td.", "geometry_context.")
     for n, p in model.named_parameters():
         if not p.requires_grad:
             continue
-        if n.startswith("rgb_bbone") or n.startswith("tir_bbone") or ".backbone." in n:
+        if n.endswith("_affine_A"):
+            # Trainable global cross-modal affine. It starts from the
+            # training-split fit, so it gets the conservative backbone learning
+            # rate and, crucially, **no weight decay**: AdamW would otherwise
+            # shrink the affine towards zero.
+            geo.append(p)
+        elif n.startswith("rgb_bbone") or n.startswith("tir_bbone") or ".backbone." in n:
             bb.append(p)
         elif n.startswith(new_prefixes):
             new.append(p)
@@ -541,6 +624,9 @@ def param_groups(model: PGSFDet, cfg) -> List[Dict[str, object]]:
         {"params": bb, "lr": cfg.optim.lr * cfg.optim.lr_backbone_mult, "name": "backbone"},
         {"params": rest, "lr": cfg.optim.lr, "name": "rest"},
     ]
+    if geo:
+        groups.append({"params": geo, "lr": cfg.optim.lr * cfg.optim.lr_backbone_mult,
+                       "name": "geo_affine", "weight_decay": 0.0})
     if new:
         groups.append({"params": new, "lr": cfg.optim.lr * cfg.optim.lr_new_mult,
                        "name": "new_modules"})

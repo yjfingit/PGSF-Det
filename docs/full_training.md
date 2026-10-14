@@ -6,7 +6,7 @@
 `requirements-training.lock.txt`。
 
 ```bash
-cd /home/yangjuanfeng/lab/projects/SkyGuard-RGBT/repo/code/PGSF-Det
+cd /home/yangjuanfeng/lab/projects/SkyGuard-RGBT/pgsf-det
 UV_PROJECT_ENVIRONMENT=/home/yangjuanfeng/lab/envs/PGSF-Det uv sync --locked
 source /home/yangjuanfeng/lab/envs/PGSF-Det/bin/activate
 ```

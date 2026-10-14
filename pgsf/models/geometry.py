@@ -67,11 +67,24 @@ def fit_affine(src: torch.Tensor, dst: torch.Tensor) -> Tuple[torch.Tensor, torc
 def invert_affine(A: torch.Tensor) -> torch.Tensor:
     """Reverse a normalized homogeneous 2x3 affine (supports batched matrices).
 
-    Pseudoinverse also gives a finite fallback for rank-deficient training fits.
+    Closed-form 2x2 inverse built from elementwise ops. ``torch.linalg.pinv`` is
+    deliberately avoided: the affine is a *trainable* parameter, so this runs
+    inside the forward pass, and cuSOLVER's runtime workspace allocation is
+    illegal during CUDA-graph capture. A sign-preserving magnitude clamp keeps
+    the result finite if the affine becomes near-singular.
     """
-    linear = torch.linalg.pinv(A[..., :2].float())
-    offset = -(linear @ A[..., 2:].float())
-    return torch.cat([linear, offset], dim=-1).to(A.dtype)
+    M = A[..., :2].float()
+    t = A[..., 2:].float()
+    a, b = M[..., 0, 0], M[..., 0, 1]
+    c, d = M[..., 1, 0], M[..., 1, 1]
+    det = a * d - b * c
+    tiny = 1e-6
+    sign = torch.where(det < 0, -torch.ones_like(det), torch.ones_like(det))
+    det = torch.where(det.abs() < tiny, tiny * sign, det)
+    inv = torch.stack((torch.stack((d / det, -b / det), -1),
+                       torch.stack((-c / det, a / det), -1)), -2)
+    offset = -(inv @ t)
+    return torch.cat((inv, offset), dim=-1).to(A.dtype)
 
 
 def augment_affine(A: torch.Tensor, transform: Optional[torch.Tensor]) -> torch.Tensor:
@@ -115,9 +128,12 @@ class ProbGeoPrior(nn.Module):
         nn.init.zeros_(self.unc[-1].weight)
         nn.init.zeros_(self.unc[-1].bias)
         self.eps = 1e-4
-        # A prior sigma of ~0.05 in normalised units (~5% of the frame), matching
-        # the measured cross-modal centre offset spread on UAV-CB.
-        self.log_sigma_init = float(torch.log(torch.tensor(0.05)))
+        # Prior sigma in normalised units. The default (5% of the frame) is the
+        # historical UAV-CB value; the trainer overwrites it with the residual
+        # spread measured on the training split, so another platform does not
+        # inherit this dataset's number. Stored as a buffer so it travels with
+        # the checkpoint and stays in sync with the EMA copy.
+        self.register_buffer("log_sigma_init", torch.tensor(math.log(0.05)))
         # **Floor on sigma.** The Gaussian NLL is minimised at sigma -> 0 whenever mu
         # is on target (the density grows without bound), so an unbounded sigma makes
         # the objective unbounded from below: during training the term drove itself to
@@ -127,9 +143,19 @@ class ProbGeoPrior(nn.Module):
         self.sigma_floor = 0.02
 
     # ------------------------------------------------------------------ #
+    @torch.no_grad()
     def set_affine(self, A: torch.Tensor, b: torch.Tensor) -> None:
         self.A.copy_(A.to(self.A.device, self.A.dtype))
         self.b.copy_(b.to(self.b.device, self.b.dtype))
+
+    @torch.no_grad()
+    def set_sigma_init(self, sigma: float) -> None:
+        """Set the prior sigma from a residual spread measured on the data.
+
+        ``sigma`` is in normalised units, the same convention as ``res_std`` in
+        ``geo_prior.json``.
+        """
+        self.log_sigma_init.fill_(math.log(max(float(sigma), 1e-4)))
 
     @torch.no_grad()
     def fit_from_pairs(self, src: torch.Tensor, dst: torch.Tensor) -> None:

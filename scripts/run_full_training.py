@@ -33,8 +33,9 @@ def main():
     configs=[load_config(f'{a.config_prefix}_stage{s}.yaml') for s in (1,2)]
     env=dict(os.environ,CUDA_VISIBLE_DEVICES=','.join(map(str,gpus)),OMP_NUM_THREADS='4',MKL_NUM_THREADS='4',
              PYTHONUNBUFFERED='1',PYTHONNOUSERSITE='1',PYTHONPATH=str(root))
-    for c in configs:c.optim.batch_size=8
-    print(f'[GPU auto-select] GPUs={gpus}; batch=8/GPU; global batch={8*len(gpus)}',flush=True)
+    for c in configs:c.optim.batch_size=configs[0].optim.batch_size
+    print(f'[GPU auto-select] GPUs={gpus}; per-gpu batch={configs[0].optim.batch_size}; '
+          f'global batch={configs[0].optim.batch_size*len(gpus)}',flush=True)
     status={'pid':os.getpid(),'python':sys.executable,'physical_gpus':gpus,'gpu_inventory':inventory,
             'epoch_budget':sum(c.optim.epochs for c in configs),'stages':[c.optim.epochs for c in configs],
             'early_stop_patience':[c.optim.early_stop_patience for c in configs],
@@ -52,7 +53,7 @@ def main():
         cfg=root/f'{a.config_prefix}_stage{stage}.yaml'
         command=[sys.executable,'-m','torch.distributed.run','--standalone',f'--nproc_per_node={len(gpus)}',
                  str(root/'scripts/train.py'),'--config',str(cfg),'--out-dir',str(directory),
-                 '--set','optim.batch_size=8']
+                 '--set',f'optim.batch_size={configs[0].optim.batch_size}']
         checkpoint=directory/'ckpt/last.pt'
         if checkpoint.exists():command+=['--resume',str(checkpoint)]
         elif stage==2:

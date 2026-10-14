@@ -81,8 +81,10 @@ def main():
                  for k, v in item.items()}
         res, _ = model.inference(batch, max_det=cfg.eval.max_det,
                                  score_thr=args.score_thr, nms_thr=cfg.eval.nms_thr)
-        rgb_gt = item["boxes_rgb_px"][item["mask"] > 0.5].numpy()
-        tir_gt = item["boxes_tir_px"][item["mask"] > 0.5].numpy()
+        # Each modality's GT is filtered by *its own* mask, so a TIR-only object
+        # can no longer show up as a zero box on the RGB panel.
+        rgb_gt = item["boxes_rgb_px"][item.get("mask_rgb", item["mask"]) > 0.5].numpy()
+        tir_gt = item["boxes_tir_px"][item.get("mask_tir", item["mask"]) > 0.5].numpy()
 
         # draw on the *original* resolution images, so boxes map 1:1
         rgb_raw = np.array(Image.open(item_frame_rgb(frames, i)).convert("RGB"))

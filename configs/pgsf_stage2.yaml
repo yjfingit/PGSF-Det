@@ -5,7 +5,7 @@ device: cuda
 out_dir: outputs/pgsf_v2_stage2
 data:
   root: /home/yangjuanfeng/lab/shared/datasets/UAV-CB
-  split_dir: /home/yangjuanfeng/lab/projects/SkyGuard-RGBT/data/splits/uavcb
+  split_dir: /home/yangjuanfeng/lab/projects/SkyGuard-RGBT/dataset/UAV-CB/splits
   use_fixed_split: true
   scenes:
   - building

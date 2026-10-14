@@ -41,13 +41,11 @@ class CudaGraphForward:
         def run():
             out=model(self.inputs)
             if decode:
-                from pgsf.models.detector import decode_boxes_scores
+                from pgsf.models.detector import decode_modality
                 for name in ('rgb','tir'):
-                    sel=out['sel_'+name]
-                    out['_decoded_'+name]=decode_boxes_scores(
-                        out['pred_'+name],sel['pts'],self.inputs[name+'_hw'],
-                        model.cfg.model.max_wh,sel['boxes'] if model.v2 else None,
-                        sel.get('objectness') if model.v2 else None,model.cfg.model.score_fusion_power)
+                    out['_decoded_'+name]=decode_modality(
+                        out['pred_'+name],out['sel_'+name],self.inputs[name+'_hw'],
+                        model.cfg.model)
             return out
         with torch.cuda.device(self.device), torch.inference_mode(), \
                 torch.amp.autocast('cuda', dtype=torch.float16):

@@ -62,11 +62,14 @@ def main():
         if args.eval_only:selected=selected[:1]
         gpu_ids=[g['index'] for g in selected]
         env=dict(os.environ,CUDA_VISIBLE_DEVICES=','.join(map(str,gpu_ids)))
-        print(f'[GPU auto-select] GPUs={gpu_ids}; batch=8/GPU; global batch={8*len(gpu_ids)}',flush=True)
+        print(f'[GPU auto-select] GPUs={gpu_ids}; per-gpu batch={cfg.optim.batch_size}; '
+              f'global batch={cfg.optim.batch_size*len(gpu_ids)}',flush=True)
         command=[sys.executable,'-m','torch.distributed.run','--standalone',f'--nproc_per_node={len(gpu_ids)}',
                  str(Path(__file__).resolve()),*sys.argv[1:]]
         raise SystemExit(subprocess.call(command,env=env))
-    if 'LOCAL_RANK' in os.environ:cfg.optim.batch_size=8
+    # Batch size comes from the config (each GPU gets ``optim.batch_size`` samples);
+    # it is deliberately NOT overwritten here, because the memory budget differs
+    # per architecture -- the v3 configs target 2x 10GB RTX 3080 with batch 2.
     if args.out_dir:
         cfg.out_dir = args.out_dir
     os.makedirs(cfg.out_dir, exist_ok=True)

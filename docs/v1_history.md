@@ -62,7 +62,7 @@ CUDA_VISIBLE_DEVICES=2 $PY scripts/check_training.py
 复用仓库内已有的官方口径划分，保证与其他 baseline 可比：
 
 ```
-/home/yangjuanfeng/lab/projects/SkyGuard-RGBT/data/splits/uavcb/{train,val,test}.txt
+/home/yangjuanfeng/lab/projects/SkyGuard-RGBT/dataset/UAV-CB/splits/{train,val,test}.txt
 ```
 
 该划分是论文 6:2:2 分层规则的**本地重建版**（seed 20261009，排除 10 对人工复核
@@ -240,7 +240,7 @@ return (0.5 * quad + 0.5 * (logdet - logdet_ref)).mean()
 ## 4. 运行
 
 ```bash
-cd /home/yangjuanfeng/lab/projects/SkyGuard-RGBT/repo/code/PGSF-Det
+cd /home/yangjuanfeng/lab/projects/SkyGuard-RGBT/pgsf-det
 PY=/home/yangjuanfeng/lab/envs/venv/bin/python
 
 # 形状 / 前向 / 反向 / 参数 / 显存 / 延迟 全量校验

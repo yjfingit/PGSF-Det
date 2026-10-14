@@ -25,7 +25,7 @@ class DataConfig:
     # manifest (seed 20261009).  This is what makes PGSF-Det numbers comparable
     # with the other baselines here.  Falls back to the internal sequence-level
     # split when the manifest is missing.
-    split_dir: str = "/home/yangjuanfeng/lab/projects/SkyGuard-RGBT/data/splits/uavcb"
+    split_dir: str = "/home/yangjuanfeng/lab/projects/SkyGuard-RGBT/dataset/UAV-CB/splits"
     use_fixed_split: bool = True
     # network input resolution (H, W) for each modality -- deliberately different,
     # because UAV-CB RGB (1920x1080) and TIR (640x512) have different native sizes.
@@ -56,6 +56,21 @@ class DataConfig:
     close_aug_epochs: int = 0
     # geometric prior fitting: only drawn from the *training* split
     geo_prior_samples: int = 3000
+    # --- multi-object / multi-class data (v3) ---------------------------------
+    # ``class_names`` fixes the label -> class-id mapping.  A label outside this
+    # list is dropped rather than silently remapped, so a typo cannot become class 0.
+    class_names: Tuple[str, ...] = ("drone",)
+    # Pad *every* annotated box (not only the first) and emit per-modality masks,
+    # integer labels, and the instance-correspondence matrix ``corr_pairs``.
+    # ``corr_pairs`` is what makes the correspondence losses computable; when a
+    # dataset cannot provide it (no instance pairing), the objective falls back to
+    # the two detection losses only.
+    multi_object: bool = True
+    # Pair the i-th object of RGB with the i-th of TIR.  This is an *assumption*
+    # about the annotation order, so it is off by default; UAV-CB configs switch it
+    # on because that dataset has exactly one object per modality, which makes the
+    # pairing exact rather than assumed.
+    pair_by_index: bool = False
 
 
 # --------------------------------------------------------------------------- #
@@ -101,6 +116,53 @@ class ModelConfig:
     hard_negative_weight: float = 2.0
     lambda_geo: float = 0.35  # weight of log P_G inside attention logits
     lambda_box: float = 0.35  # weight of log P(b_j | b_i) inside late attention
+    # --- v3 object-level correspondence fusion ---------------------------------
+    # One object-level fusion only: 128 candidates per modality, a 64-d Q/K coarse
+    # retrieval over {candidates + 8x8 grid tokens + null}, Top-2 Gaussian anchors,
+    # 8 local samples per anchor spread over P2-P5, and a rejection gate.
+    use_v3_fusion: bool = True   # stage >= 2 only; False = independent detection
+    retrieval_dim: int = 64      # Q/K width of the coarse retrieval
+    corr_top_k: int = 2          # number of retrieved anchors
+    corr_samples: int = 8        # samples per anchor Gaussian, over P2-P5
+    corr_levels: Tuple[str, ...] = ("P2", "P3", "P4", "P5")
+    corr_heads: int = 4
+    corr_ff_mult: int = 4
+    corr_sigma_floor: float = 0.02
+    lambda_local: float = 0.35   # weight of log N(sample; mu, Sigma) inside attention
+    corr_hard_negative_weight: float = 2.0
+    v3_grid: int = 8             # grid tokens are v3_grid x v3_grid
+    v3_grid_levels: Tuple[str, ...] = ("P3", "P4")
+    roi_width: int = 64          # width of the RoI spatial descriptor
+    num_classes: int = 1         # 1 keeps the legacy single-logit head
+    w_corr: float = 0.3          # weight of (null + retrieval) correspondence terms
+    w_corr_geo: float = 0.2      # weight of the anchor Gaussian NLL
+    # --- v4: asymmetric semantic / localization fusion (TD-Fusion) -------------
+    # One object-level cross-modal interaction.  ``n_cand`` is the K of the spec
+    # (default 128 in the v4 configs); ``td_top_l`` the Top-L anchors, and
+    # ``td_samples`` the sample points per anchor.
+    use_td_fusion: bool = True   # stage >= 2 only; False = independent detection
+    cand_levels: Tuple[str, ...] = ("P2", "P3", "P4", "P5")
+    cand_min_per_level: int = 8  # reserved per-level quota of the K candidates
+    roi_size: int = 3            # RoI descriptor S is [B,K,128,roi_size,roi_size]
+    roi_sampling_ratio: int = 2
+    td_top_l: int = 2
+    td_samples: int = 4
+    td_heads: int = 4
+    td_ff_mult: int = 4
+    alpha_init: float = 0.1      # learnable localization-modulation scale
+    # --- v4 loss weights ------------------------------------------------------
+    lambda_iou: float = 2.5      # CIoU weight in the final detection loss
+    lambda_l1: float = 1.0       # L1 weight in the final detection loss
+    w_self: float = 0.5          # auxiliary un-fused (self-modal) detection loss
+    w_prop: float = 0.5          # proposal head loss
+    lambda_pbox: float = 1.5     # coarse-box CIoU inside the proposal loss
+    lambda_quality: float = 0.5  # proposal quality BCE inside the proposal loss
+    lambda_match: float = 1.0    # bidirectional matching CE
+    w_cons: float = 0.1          # class-consistency JS
+    cons_start_fraction: float = 0.5   # from this training fraction on, mutual selection is trusted
+    cons_margin: float = 1.0     # min top1-top2 similarity margin for the mutual-selection pair
+    use_match_loss: bool = True
+    use_cons_loss: bool = True
     # --- detection head -------------------------------------------------------
     head_width: int = 128
     n_layers_head: int = 2

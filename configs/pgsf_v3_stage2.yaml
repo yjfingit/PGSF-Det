@@ -1,0 +1,168 @@
+name: pgsf_v3_stage2
+stage: 2
+seed: 20261014
+device: cuda
+out_dir: outputs/v3_stage2
+data:
+  root: /home/yangjuanfeng/lab/shared/datasets/UAV-CB
+  scenes:
+  - building
+  - cloud
+  - ground
+  - powerline
+  - vegetation
+  split_dir: /home/yangjuanfeng/lab/projects/SkyGuard-RGBT/dataset/UAV-CB/splits
+  use_fixed_split: true
+  rgb_size:
+  - 800
+  - 1280
+  tir_size:
+  - 512
+  - 640
+  train_ratio: 0.8
+  val_ratio: 0.1
+  test_ratio: 0.1
+  allow_test: false
+  max_train_per_scene: 0
+  num_workers: 4
+  seed: 20261014
+  scale_range:
+  - 0.9
+  - 1.15
+  hflip: 0.5
+  color_jitter: 0.15
+  tir_gain_jitter: 0.1
+  rgb_normalization: unit
+  modality_dropout: 0.05
+  degrade_prob: 0.1
+  translation_prob: 0.25
+  translation_range: 0.025
+  zoom_prob: 0.5
+  blur_max: 0.8
+  noise_std: 6.0
+  close_aug_epochs: 12
+  geo_prior_samples: 3000
+  class_names:
+  - drone
+  multi_object: true
+  pair_by_index: true
+model:
+  architecture_version: 3
+  backbone_name: yolo11s
+  backbone_weights: /home/yangjuanfeng/lab/shared/weights/yolo11s.pt
+  width_mult: 1.0
+  backbone_depths:
+  - 3
+  - 6
+  - 9
+  - 3
+  use_dw_bottleneck: true
+  neck_dim: 128
+  neck_out: 128
+  neck_repeats: 3
+  msce_alpha_max: 0.5
+  msce_width: 24
+  n_cand: 128
+  n_global: 16
+  n_local_samples: 8
+  heat_stride: 8
+  nms_kernel: 5
+  proposal_width: 32
+  injection_end_fraction: 0.7
+  inject_gt_ratio: 0.1
+  d_model: 128
+  n_heads: 4
+  n_cand_late: 128
+  ff_mult: 4
+  context_dim: 128
+  use_image_context: true
+  use_covariance_sampling: true
+  use_roi_tokens: true
+  use_null: true
+  geo_jitter_prob: 0.0
+  geo_jitter_std: 0.015
+  hard_negative_weight: 2.0
+  lambda_geo: 0.35
+  lambda_box: 0.35
+  use_v3_fusion: true
+  retrieval_dim: 64
+  corr_top_k: 2
+  corr_samples: 8
+  corr_levels:
+  - P2
+  - P3
+  - P4
+  - P5
+  corr_heads: 4
+  corr_ff_mult: 4
+  corr_sigma_floor: 0.02
+  lambda_local: 0.35
+  corr_hard_negative_weight: 2.0
+  v3_grid: 8
+  v3_grid_levels:
+  - P3
+  - P4
+  roi_width: 64
+  num_classes: 1
+  w_corr: 0.3
+  w_corr_geo: 0.2
+  head_width: 128
+  n_layers_head: 2
+  max_wh: 0.5
+  assign_pos_thr: 0.5
+  assign_center_thr: 0.05
+  w_det: 1.0
+  w_cls: 1.0
+  w_box: 2.5
+  w_nwd: 0.5
+  w_heat: 1.0
+  w_pre_box: 1.5
+  w_pre_quality: 0.5
+  w_size_geo: 0.05
+  score_fusion_power: 0.5
+  w_geo: 0.3
+  w_assoc_mid: 0.5
+  w_assoc_late: 0.5
+  use_msce: true
+  use_mid_fusion: false
+  use_geo_prior: false
+  use_gate: true
+  use_late_fusion: false
+  use_nwd: true
+optim:
+  epochs: 80
+  batch_size: 2
+  lr: 0.0002
+  lr_backbone_mult: 0.1
+  lr_new_mult: 2.0
+  weight_decay: 0.05
+  warmup_epochs: 2.0
+  min_lr_ratio: 0.02
+  optimizer: adamw
+  ema: true
+  ema_decay: 0.999
+  amp: true
+  grad_clip: 5.0
+  pretrained_backbone: ''
+  freeze_backbone: false
+  early_stop_patience: 20
+  early_stop_min_delta: 0.0001
+  log_interval: 0
+  min_epochs: 0
+eval:
+  max_det: 50
+  score_thr: 0.05
+  nms_thr: 0.45
+  nms_topk: 300
+  conf_thr: 0.001
+  iou_thrs:
+  - 0.5
+  - 0.55
+  - 0.6
+  - 0.65
+  - 0.7
+  - 0.75
+  - 0.8
+  - 0.85
+  - 0.9
+  - 0.95

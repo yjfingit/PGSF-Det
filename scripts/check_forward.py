@@ -67,6 +67,15 @@ def make_fake_batch(cfg, device, batch=1):
     bt[:, 0, 0] = br[:, 0, 0]
     bt[:, 0, 1] = (br[:, 0, 1] - 0.035).clamp(0.01, 0.99)
     ct[:, 0] = bt[:, 0, :2]
+
+    # ---- v3/v4 payload: per-modality masks, integer labels and instance pairing ----
+    # The pairing is the identity on slot 0, which is exactly correct here (one
+    # object per modality), so the correspondence objectives are exercised too.
+    # Everything must live on ``device`` -- a CPU ``corr_pairs`` silently breaks the
+    # correspondence losses on GPU.
+    labels = torch.zeros(batch, md, dtype=torch.long, device=device)
+    corr_pairs = torch.zeros(batch, md, md, device=device)
+    corr_pairs[:, 0, 0] = 1.0
     return {
         "rgb": torch.randn(batch, 3, hr, wr, generator=g).to(device),
         "tir": torch.rand(batch, 1, ht, wt, generator=g).to(device),
@@ -74,6 +83,9 @@ def make_fake_batch(cfg, device, batch=1):
         "centers_rgb": cr, "centers_tir": ct,
         "sizes_rgb": zr, "sizes_tir": zt,
         "mask": mr, "valid": mr[:, 0],
+        "mask_rgb": mr, "mask_tir": mt,
+        "labels_rgb": labels, "labels_tir": labels.clone(),
+        "corr_pairs": corr_pairs,
         "rgb_hw": torch.tensor([[hr, wr]] * batch, dtype=torch.float32, device=device),
         "tir_hw": torch.tensor([[ht, wt]] * batch, dtype=torch.float32, device=device),
     }
@@ -185,7 +197,41 @@ def check_backward(model, loss, cfg, batch, device, steps: int = 3):
     def used(pred: str) -> bool:
         return any(pred in n for n in names)
 
-    if model.v2:
+    if getattr(model, "v4", False):
+        # ``MultiScaleRoIAlign`` is parameter-free (it only samples), so it is not
+        # listed here; the two detection heads are shared between the fused and the
+        # auxiliary un-fused path, which is why they appear once.
+        required = ["prop.heads.P2", "prop.heads.P5", "cls.body", "cls.out",
+                    "reg.reduce", "reg.box_embed", "reg.out", "neck.lat2"]
+        if model.rgb_branch.msce_on:
+            required += ["msce.reduce", "msce.alpha_raw"]
+        if model.cfg.model.backbone_name == "yolo11s":
+            required += ["backbone.layers.0"]
+        else:
+            required += ["backbone.stem", "backbone.msdw"]
+        if model.v4_on:
+            required += ["match.r2t.q_proj", "match.r2t.k_proj", "match.r2t.offset",
+                         "match.r2t.level_head", "match.r2t.point_embed",
+                         "match.r2t.level_embed", "match.r2t.agg",
+                         "td.r2t.consistency", "td.r2t.gate", "td.r2t.w_cls", "td.r2t.w_reg"]
+    elif getattr(model, "v3", False):
+        required = ["heat.p2", "heat.p3", "cand.feat_proj", "grid.proj",
+                    "refine.merge", "roi_project", "box_position",
+                    "det.cls_out", "det.box_out", "det.roi_project", "det.box_embed",
+                    "neck.lat2"]
+        if model.rgb_branch.msce_on:
+            required += ["msce.reduce", "msce.alpha_raw"]
+        if model.cfg.model.backbone_name == "yolo11s":
+            required += ["backbone.layers.0"]
+        else:
+            required += ["backbone.stem", "backbone.msdw"]
+        if model.v3_on:
+            required += ["corr.q_proj", "corr.k_cand", "corr.k_grid", "corr.null_retrieval",
+                         "corr.mix", "corr.null_head", "corr.k_anchor", "corr.k_local",
+                         "corr.level_embed", "corr.attn", "corr.anchor"]
+            if model.cfg.model.use_gate:
+                required += ["corr.gate"]
+    elif model.v2:
         required=["heat.p2","heat.p3","cand.feat_proj","det.out","neck.lat2"]
         if model.rgb_branch.roi_on:required += ["refine.merge","roi_project","box_position"]
         if model.rgb_branch.msce_on:required += ["msce.reduce","msce.alpha_raw"]
@@ -242,7 +288,9 @@ def by_module_flat(model):
 
 def check_zero_init(cfg, model, device, batch):
     print("\n=== 4. fusion residual is identity at initialisation ===")
-    if not (model.mid_on or model.late_on):
+    v3_on = bool(getattr(model, "v3_on", False))
+    v4_on = bool(getattr(model, "v4_on", False))
+    if not (model.mid_on or model.late_on or v3_on or v4_on):
         print("  fusion disabled (ablation A0/A1) -- skipped")
         return
     model.eval()
@@ -251,9 +299,17 @@ def check_zero_init(cfg, model, device, batch):
         mid_on, late_on = model.mid_on, model.late_on
         try:
             model.mid_on = model.late_on = False
+            if v3_on:
+                model.v3_on = False
+            if v4_on:
+                model.v4_on = False
             independent = model(batch)
         finally:
             model.mid_on, model.late_on = mid_on, late_on
+            if v3_on:
+                model.v3_on = True
+            if v4_on:
+                model.v4_on = True
         for name in ("rgb", "tir"):
             delta = (out["pred_" + name] - independent["pred_" + name]).abs().max()
             assert float(delta) < 1e-5, f"{name} fusion changes initial detections"

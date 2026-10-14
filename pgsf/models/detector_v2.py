@@ -10,6 +10,7 @@ from pgsf.models.head import MultiScaleBoxRefine,DetHead
 from pgsf.models.msce import LiteMSCE
 from pgsf.models.neck import PANFPN
 from pgsf.models.fusion_v2 import CovarianceMidFusion,RegionLateFusion
+from pgsf.models.geometry import invert_affine
 from pgsf.models.late_fusion import select_topk_candidates
 from pgsf.losses import (DetectionLoss,draw_gaussian,gaussian_focal_loss,geometry_nll,
                          assign_candidates,correspondence_mask,supervised_association_loss)
@@ -83,7 +84,10 @@ def paired_geometry_mask(batch):
 
 def pair_affines(model,batch):
     """Known augmentation only; inference without metadata uses cached transforms."""
-    A,Ar=model._affine_A,model._affine_reverse
+    # ``A`` is a trainable parameter now, so the inverse is recomputed each
+    # step; reading the ``_affine_reverse`` buffer would use a stale value.
+    A=model._affine_A
+    Ar=invert_affine(A)
     if 'geo_transform_rgb' in batch:
         T_r=batch['geo_transform_rgb'];T_t=batch['geo_transform_tir']
         inv_r=batch['geo_inverse_rgb'];inv_t=batch['geo_inverse_tir']

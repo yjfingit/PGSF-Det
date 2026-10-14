@@ -46,11 +46,11 @@ def build_datasets(cfg) -> Tuple[Dict[str, UAVCBDataset], Dict[str, int]]:
     d = cfg.data
     fixed: Dict[str, List] = {}
     if d.use_fixed_split and os.path.isdir(d.split_dir):
-        fixed = load_split_manifest(d.split_dir, d.root, d.scenes)
+        fixed = load_split_manifest(d.split_dir, d.root, d.scenes, d.class_names)
     if fixed and fixed.get("train"):
         split = fixed
     else:
-        frames = list_frames(d.root, d.scenes)
+        frames = list_frames(d.root, d.scenes, d.class_names)
         split = build_split(frames, d.train_ratio, d.val_ratio, d.test_ratio, seed=d.seed)
 
     sets = {}
@@ -66,7 +66,10 @@ def build_datasets(cfg) -> Tuple[Dict[str, UAVCBDataset], Dict[str, int]]:
             frames_for_ds = _subsample(frames_for_ds, d.max_train_per_scene, d.seed)
         sets[k] = UAVCBDataset(frames_for_ds, d.rgb_size, d.tir_size,
                                train=(k == "train"),
-                               augment=train_aug if k == "train" else make_augment(d,False))
+                               augment=train_aug if k == "train" else make_augment(d,False),
+                               class_names=d.class_names,
+                               pair_by_index=d.pair_by_index,
+                               multi_object=d.multi_object)
     counts = {k: len(v) for k, v in sets.items()}
     return sets, counts
 
@@ -231,6 +234,12 @@ class PGSFTrainer:
         ds = self.datasets["train"]
         if len(ds) == 0:
             return
+        if int(self.cfg.model.architecture_version) >= 3:
+            # v3 replaces the fitted affine with learned appearance retrieval and
+            # per-anchor uncertainty, so there is no global warp to fit.
+            if self.is_main:
+                print("[geo] architecture_version>=3: no global affine is fitted")
+            return
         n = min(self.cfg.data.geo_prior_samples, len(ds))
         idx = np.linspace(0, len(ds) - 1, n).astype(int)
         src, dst = [], []
@@ -252,12 +261,26 @@ class PGSFTrainer:
         hom = torch.cat([src_t, torch.ones(src_t.shape[0], 1)], dim=1)
         pred = hom @ A.T
         res = (pred - dst_t)
+        # Seed the prior's initial uncertainty from the residual spread actually
+        # measured on this training split, instead of a constant tuned on one
+        # dataset. Two standard deviations are used so the prior's initial 95%
+        # interval covers the observed spread. The affine itself is a trainable
+        # parameter and keeps moving during training.
+        sigma0 = 2.0 * float(res.std(0).mean())
+        priors = list(_iter_geo_priors(self.model))
+        if self.ema:
+            priors += list(_iter_geo_priors(self.ema.module))
+        if priors:
+            sigma0 = max(sigma0, 2.0 * max(p.sigma_floor for p in priors))
+            for p in priors:
+                p.set_sigma_init(sigma0)
         stats = {
             "n_pairs": int(len(src)),
             "A": A.tolist(), "b": b.tolist(),
             "res_mean": res.mean(0).tolist(),
             "res_std": res.std(0).tolist(),
             "res_p95_abs": np.percentile(res.abs().numpy(), 95, axis=0).tolist(),
+            "sigma_init": sigma0,
         }
         if self.is_main:
             with open(os.path.join(self.out_dir, "geo_prior.json"), "w") as f:
@@ -364,7 +387,10 @@ class PGSFTrainer:
                     combined=lambda suffix:sum(mean.get(name+suffix,0.) for name in ('rgb','tir'))/2
                     fusion=sum(mean.get(key,0.)*weight for key,weight in [
                         ('geo',cfg.model.w_geo),('assoc_mid',cfg.model.w_assoc_mid),
-                        ('assoc_late',cfg.model.w_assoc_late),('size_geo',cfg.model.w_size_geo)])
+                        ('assoc_late',cfg.model.w_assoc_late),('size_geo',cfg.model.w_size_geo),
+                        ('corr',getattr(cfg.model,'w_corr',0.)),
+                        ('match',getattr(cfg.model,'lambda_match',0.)),
+                        ('cons',getattr(cfg.model,'w_cons',0.))])
                     mem=torch.cuda.max_memory_allocated(self.device)/2**30 if self.device.type=='cuda' else 0.
                     instances=sum(int(batch.get('mask_'+name,batch['mask']).sum()) for name in ('rgb','tir'))
                     size=f'{cfg.data.rgb_size[0]}x{cfg.data.rgb_size[1]}/{cfg.data.tir_size[0]}x{cfg.data.tir_size[1]}'
@@ -513,7 +539,7 @@ class PGSFTrainer:
         ck = torch.load(path, map_location="cpu", weights_only=False)
         source_stage = ck.get("config", {}).get("stage")
         transfer = self.cfg.stage >= 2 and (source_stage == 1 or
-                   (source_stage is None and not any(k.startswith(("mid.", "late."))
+                   (source_stage is None and not any(k.startswith(("mid.", "late.", "corr.", "match.", "td."))
                                                     for k in ck["model"])))
         # Stage-1 selection uses EMA validation; start stage 2 from those same weights.
         state=(ck.get('ema') or ck['model']) if transfer else ck['model']
@@ -549,6 +575,14 @@ class PGSFTrainer:
 
 
 # --------------------------------------------------------------------------- #
+def _iter_geo_priors(module):
+    """Yield every conditional-geometry prior contained in ``module``."""
+    from pgsf.models.geometry import ProbGeoPrior
+    for m in module.modules():
+        if isinstance(m, ProbGeoPrior):
+            yield m
+
+
 def fit_affine_np(src: torch.Tensor, dst: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
     """Least-squares homogeneous affine -> (A (2,3), b (2,))."""
     from pgsf.models.geometry import fit_affine
